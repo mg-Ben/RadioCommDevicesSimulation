@@ -1,0 +1,110 @@
+clear all; close all; clc;
+
+N = 4; %Orden del filtro
+RA = 1; RB = 1; %Impedancias de generador y de fuente TRAS implementar inversores a la entrada y a la salida
+fc = 0; %[Hz] Frecuencia de corte (rellenar solo para pasos bajo o pasos alto)
+f1 = 9.8e9; %[Hz] Frecuencia mínima de la banda de paso (rellenar solo para pasos banda y banda eliminada)
+f2 = 10.2e9; %[Hz] Frecuencia máxima de la banda de paso (rellenar solo para pasos banda y banda eliminada)
+toleranciaBanda = 0.23; %[%] 0.23
+Ro = 1; %[Ohmios] Impedancia de normalización: rellenar solo cuando se vaya a diseñar el filtro desde el prototipo paso bajo
+ramaSerieParalelo = 2; %1: Empezar por rama serie | 2: Empezar por rama paralelo
+n = 1; %n para el caso de transformar resonadores en LTs o bien para diseñar el filtro con inversores ideales y líneas lambda/2 (determina las longitudes eléctricas (n*pi/2 pej) así que lo podemos dejar en 1 siempre)
+Zc = 1; %[Ohmios] Impedancia característica de las líneas lambda/2 solo para el caso de querer diseñar el filtro con inversores ideales y líneas lambda/2 o bien cuando se quiera transformar un inversor a línea + C/L + línea
+erizado = 0.0431; %[dB] Rizado en dB en el caso de filtros Chebychev en la banda de paso o en fc
+g0 = 1; %[Ohmios] En el 99% de los casos este valor lo dejaremos a 1
+er = 1; %Epsilon relativa que considerar para las líneas de transmisión. Este valor se aplicará cuando se transformen los resonadores a líneas de transmisión con pérdidas
+anchoGuia = 0.01905; %Y, también nombrada como 'a'
+altoGuia = 0.009525; %X, también nombrada como 'b'
+fres = 10e9; %[Hz] Frecuencia de resonancia (frecuencia central de la banda de paso)
+largoGuia = obtainLargoGuia(fres, er, 'Rectangular', {anchoGuia, altoGuia}, 'TE', 1, 0, 1); %Z, también nombrada como 'd'
+t = 0.0015; %[m] Grosor (o longitud) de los írises
+%MUY IMPORTANTE: Cuando se envíe como argumento a las funciones
+%'obtainFres' u 'obtainKc' las dimensiones de la guía, NO ENVIAR EL LARGO dentro de la cell de dimensiones.
+%El largo se envía como argumento aparte Y SOLO en la función de obtainFres. Las dimensiones se envían como
+%cells en las que no está el largo.
+f1aux = f1;
+f1 = f1 - f1aux*toleranciaBanda/100;
+f2 = f2 + f1aux*toleranciaBanda/100;
+erizado = sqrt(10^(erizado/10) - 1);
+Lr = 10*log10((1+erizado^2)/(erizado^2));
+[gs, gL] = Calc_vg('Chebychev', N, -Lr);
+
+
+%%
+descriptorBase = createLPPrototypeDescriptor(gs, ramaSerieParalelo);
+descriptorBase = convertLowPassPrototype(descriptorBase, 'BP', Ro, fc, f1, f2);
+
+Dprima = obtainDeltaPrima(f1, f2, er, 'Rectangular', {anchoGuia, altoGuia}, 'TE', 1, 0);
+fres = obtainFresonancia(er, 'Rectangular', {anchoGuia, altoGuia}, largoGuia, 'TE', 1, 0, 1);
+% descriptor = designFilterWithInv('INVsANDLambda_2', {2, 2, 12, 15}, gs, RA, RB, fc, f1, f2, g0, gL, n, Zc)
+descriptor = designFilterWithInvAndWaveGuide('INVsANDLambda_2WAVEGUIDE', gs, g0, gL, Zc, Dprima, er, 'Rectangular', {anchoGuia, altoGuia}, largoGuia, 'TE', 1, 0, 1)
+%%
+% descriptor = considerQ(descriptor, 1000, 0)
+% f0 = (f1 + f2)/2;
+% descriptor = ResonatorsTransformation(descriptor, 'LTlambda_4SerialCA', f0, n, er)
+
+f0 = (f1 + f2)/2;
+dref = 20; %[mm] Longitud de las guías de referencia usadas para transformar los inversores en írises en guía de onda, simular dichos írises y calcular la anchura asociada al K
+descriptor = InvertersTransformation(descriptor, 'IRIS_WG', f0, Zc, {anchoGuia, altoGuia}, dref, t)
+
+%Si hemos implementado en guía de onda írises, debemos corregir las
+%longitudes de las cavidades (líneas lambda/2 intermedias):
+
+dsAntes = [dref getLengths(descriptor)*1000 dref];
+descriptor = correctWGLengths(descriptor)
+%%
+[S11B, S12B, S21B, S22B, freqs] = simulateFilter(8e9, 12e9, 10001, descriptorBase, Ro*g0, Ro/gL);
+
+%En caso de haber implementado inversores como írises en guía de onda, simular con esta
+%función:
+
+as = [anchoGuia getWidths(descriptor) anchoGuia]*1000;
+ds = [dref getLengths(descriptor)*1000 dref];
+b = altoGuia*1000;
+%Definición del dominio de frecuencias de simulación:
+fmin = 8; %[GHz]
+fmax = 12; %[GHz]
+fpoints = 10001;
+fstep = (fmax-fmin)/(fpoints - 1); freqs = [fmin:fstep:fmax];
+pintaPerfil(as, ds);
+[S11, S21, S22] = calculaMM(freqs, as, ds, b);
+
+%%
+figure;
+plot(freqs, 20*log10(abs(S11)), 'LineWidth', 0.2); grid on; axis tight; ylim([-60 0]); xlabel('f [Hz]'); 
+ylabel('20log_1_0(|S_1_1|)'); hold on; plot(freqs, 20*log10(abs(S21)), 'LineWidth', 1.3);
+legend('S_1_1', 'S_2_1');
+hold on;
+plot(freqs, 20*log10(abs(S11B)), 'LineWidth', 0.2); grid on; axis tight; ylim([-60 0]); xlabel('f [Hz]'); 
+ylabel('20log_1_0(|S_1_1|)'); hold on; plot(freqs, 20*log10(abs(S21B)), 'LineWidth', 1.3);
+legend('S_1_1', 'S_2_1');
+
+%%
+fk1 = 8; fk2 = 9.25; val = -40; tolk =  40; 
+h1=plot([ fk1 fk1 fk2 fk2 fk1] , [ val+tolk val val val+tolk val+tolk] , 'k' , 'Linewidth' , 1 );
+hatch(h1,45,'r','-',3.5,0.5); axis auto;
+
+fk1 = 11; fk2 = 11.5; val = -30; tolk =  30; 
+h1=plot([ fk1 fk1 fk2 fk2 fk1] , [ val+tolk val val val+tolk val+tolk] , 'k' , 'Linewidth' , 1 );
+hatch(h1,45,'r','-',3.5,0.5); axis auto;
+
+fk1 = 11.5; fk2 = 12; val = -40; tolk =  40; 
+h1=plot([ fk1 fk1 fk2 fk2 fk1] , [ val+tolk val val val+tolk val+tolk] , 'k' , 'Linewidth' , 1 );
+hatch(h1,45,'r','-',3.5,0.5); axis auto;
+
+fk1 = 9.8; fk2 = 10.2; val = -20; tolk =  20; 
+h1=plot([ fk1 fk1 fk2 fk2 fk1] , [ val+tolk val val val+tolk val+tolk] , 'k' , 'Linewidth' , 1 );
+hatch(h1); axis auto;
+%%
+%Importante: recuerde que si va a simular un filtro que tiene inversores,
+%el valor de RA y RB está pensado para que el usuario no tenga que
+%preocuparse por meter GA=1/RA o GB=1/RB, sino que se introduce RA y RB y
+%se hacen los cálculos solos. Sin embargo, al simular (simulateFilter), tenga en cuenta que
+%Zo1 y Zo2 para sacar los parámetros S podría ser RA y RB o bien GA y GB según el
+%diseño (acudir a las diapositivas).
+anchuras = getWidths(descriptor);
+alturas = getHeights(descriptor);
+longitudes = getLengths(descriptor);
+for i=1:length(anchuras)
+    fprintf("Anchura: %.6f | Altura: %.6f | Longitud: %.6f\n", anchuras(i)*1000, alturas(i)*1000, longitudes(i)*1000);
+end
